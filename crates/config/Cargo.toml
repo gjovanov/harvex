@@ -1,0 +1,12 @@
+[package]
+name = "harvex-config"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+config = { workspace = true }
+tracing = { workspace = true }
+dotenvy = { workspace = true }

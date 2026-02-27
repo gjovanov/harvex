@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = ["crates/config", "crates/db", "crates/services", "crates/api", "crates/tests"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Goran Jovanov <gjovanov@gmail.com>"]
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["multipart"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+duckdb = { version = "1.2", features = ["bundled"] }
+config = "0.14"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+calamine = "0.26"
+pdf-extract = "0.8"
+image = "0.25"
+rust_xlsxwriter = { version = "0.82", features = ["zlib"] }
+thiserror = "2"
+anyhow = "1"
+dotenvy = "0.15"
+nanoid = "0.4"
+tempfile = "3"

@@ -1,0 +1,15 @@
+[package]
+name = "harvex-tests"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+harvex-config = { path = "../config" }
+harvex-db = { path = "../db" }
+harvex-services = { path = "../services" }
+harvex-api = { path = "../api" }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }

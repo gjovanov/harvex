@@ -1,0 +1,15 @@
+[package]
+name = "harvex-db"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+harvex-config = { path = "../config" }
+duckdb = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+nanoid = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
