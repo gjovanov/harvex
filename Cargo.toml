@@ -29,3 +29,7 @@ anyhow = "1"
 dotenvy = "0.15"
 nanoid = "0.4"
 tempfile = "3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"
+zip = "2"
+mime_guess = "2"

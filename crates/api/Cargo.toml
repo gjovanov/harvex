@@ -26,3 +26,5 @@ nanoid = { workspace = true }
 chrono = { workspace = true }
 anyhow = { workspace = true }
 duckdb = { workspace = true }
+tokio-stream = { workspace = true }
+futures-util = { workspace = true }
