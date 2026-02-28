@@ -1,20 +1,16 @@
 #!/bin/bash
 set -euo pipefail
 
-# Issue TLS certificate for harvex.lgrai.app via acme.sh on mars
-# Run this script ON mars (or ssh to mars first)
+# TLS for harvex.lgrai.app is handled by the *.lgrai.app wildcard cert
+# managed by the lgr-deploy project. No separate cert is needed.
+#
+# If the wildcard cert needs renewal, run:
+#   cd /home/gjovanov/lgr-deploy && sudo ./scripts/setup-certs.sh
+#
+# Verify coverage:
+#   openssl x509 -in /gjovanov/nginx/cert/lgrai.app.pem -text -noout | grep DNS
 
-DOMAIN="harvex.lgrai.app"
-CF_TOKEN="${CF_API_TOKEN:?Set CF_API_TOKEN}"
-
-echo "==> Issuing TLS certificate for ${DOMAIN}..."
-export CF_Token="${CF_TOKEN}"
-~/.acme.sh/acme.sh --issue --dns dns_cf -d "${DOMAIN}"
-
-echo "==> Installing certificate to nginx..."
-~/.acme.sh/acme.sh --install-cert -d "${DOMAIN}" \
-  --key-file "/etc/nginx/ssl/${DOMAIN}.key" \
-  --fullchain-file "/etc/nginx/ssl/${DOMAIN}.crt" \
-  --reloadcmd "systemctl reload nginx"
-
-echo "==> Done!"
+echo "==> harvex.lgrai.app uses the *.lgrai.app wildcard cert"
+echo "==> Checking cert coverage..."
+openssl x509 -in /gjovanov/nginx/cert/lgrai.app.pem -text -noout 2>/dev/null | grep -A1 "Subject Alternative Name"
+echo "==> No action needed."
