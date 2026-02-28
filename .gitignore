@@ -21,6 +21,10 @@ ui/node_modules/
 ui/dist/
 ui/.vite/
 
+# Playwright
+ui/test-results/
+ui/playwright-report/
+
 # Data
 /data/uploads/
 /data/db/
