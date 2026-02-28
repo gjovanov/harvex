@@ -11,7 +11,7 @@ data:
   HARVEX__STORAGE__UPLOAD_DIR: "/app/data/uploads"
   HARVEX__STORAGE__MAX_FILE_SIZE_MB: "50"
   HARVEX__PROCESSING__MAX_CONCURRENT: "2"
-  HARVEX__LLM__API_URL: "http://localhost:11434/v1"
+  HARVEX__LLM__API_URL: "http://10.10.20.11:11434/v1"
   HARVEX__LLM__API_KEY: ""
   HARVEX__LLM__MODEL_NAME: "qwen2.5:7b"
   HARVEX__LLM__CONTEXT_SIZE: "4096"
@@ -26,6 +26,8 @@ metadata:
   namespace: harvex
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: harvex
