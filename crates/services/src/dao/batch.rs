@@ -7,13 +7,13 @@ pub struct BatchDao;
 impl BatchDao {
     pub fn create(pool: &DbPool, name: &str, model_name: Option<&str>) -> Result<Batch, duckdb::Error> {
         let id = nanoid::nanoid!();
-        let conn = pool.conn();
-
-        conn.execute(
-            "INSERT INTO batches (id, name, model_name) VALUES (?, ?, ?)",
-            params![id, name, model_name],
-        )?;
-
+        {
+            let conn = pool.conn();
+            conn.execute(
+                "INSERT INTO batches (id, name, model_name) VALUES (?, ?, ?)",
+                params![id, name, model_name],
+            )?;
+        }
         Self::get_by_id(pool, &id)
     }
 
@@ -21,7 +21,7 @@ impl BatchDao {
         let conn = pool.conn();
         conn.query_row(
             "SELECT id, name, status, total_files, processed_files, failed_files,
-                    model_name, created_at, updated_at, completed_at
+                    model_name, CAST(created_at AS VARCHAR), CAST(updated_at AS VARCHAR), CAST(completed_at AS VARCHAR)
              FROM batches WHERE id = ?",
             params![id],
             |row| {
@@ -45,7 +45,7 @@ impl BatchDao {
         let conn = pool.conn();
         let mut stmt = conn.prepare(
             "SELECT id, name, status, total_files, processed_files, failed_files,
-                    model_name, created_at, updated_at, completed_at
+                    model_name, CAST(created_at AS VARCHAR), CAST(updated_at AS VARCHAR), CAST(completed_at AS VARCHAR)
              FROM batches ORDER BY created_at DESC",
         )?;
 

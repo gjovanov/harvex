@@ -17,27 +17,27 @@ impl ExtractionDao {
         processing_time_ms: i64,
     ) -> Result<Extraction, duckdb::Error> {
         let id = nanoid::nanoid!();
-        let conn = pool.conn();
+        {
+            let conn = pool.conn();
+            let structured_json = structured_data.map(|v| v.to_string());
 
-        let structured_json = structured_data.map(|v| v.to_string());
-
-        conn.execute(
-            "INSERT INTO extractions (id, document_id, batch_id, document_type, raw_text,
-             structured_data, confidence, model_used, processing_time_ms)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![
-                id,
-                document_id,
-                batch_id,
-                document_type,
-                raw_text,
-                structured_json,
-                confidence,
-                model_used,
-                processing_time_ms
-            ],
-        )?;
-
+            conn.execute(
+                "INSERT INTO extractions (id, document_id, batch_id, document_type, raw_text,
+                 structured_data, confidence, model_used, processing_time_ms)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    id,
+                    document_id,
+                    batch_id,
+                    document_type,
+                    raw_text,
+                    structured_json,
+                    confidence,
+                    model_used,
+                    processing_time_ms
+                ],
+            )?;
+        }
         Self::get_by_id(pool, &id)
     }
 
@@ -45,7 +45,7 @@ impl ExtractionDao {
         let conn = pool.conn();
         conn.query_row(
             "SELECT id, document_id, batch_id, document_type, raw_text,
-                    structured_data, confidence, model_used, processing_time_ms, created_at
+                    structured_data, confidence, model_used, processing_time_ms, CAST(created_at AS VARCHAR)
              FROM extractions WHERE id = ?",
             params![id],
             Self::map_row,
@@ -56,7 +56,7 @@ impl ExtractionDao {
         let conn = pool.conn();
         let mut stmt = conn.prepare(
             "SELECT id, document_id, batch_id, document_type, raw_text,
-                    structured_data, confidence, model_used, processing_time_ms, created_at
+                    structured_data, confidence, model_used, processing_time_ms, CAST(created_at AS VARCHAR)
              FROM extractions WHERE batch_id = ? ORDER BY created_at ASC",
         )?;
 
@@ -75,7 +75,7 @@ impl ExtractionDao {
 
         let mut sql = String::from(
             "SELECT id, document_id, batch_id, document_type, raw_text,
-                    structured_data, confidence, model_used, processing_time_ms, created_at
+                    structured_data, confidence, model_used, processing_time_ms, CAST(created_at AS VARCHAR)
              FROM extractions WHERE batch_id = ?",
         );
 

@@ -15,14 +15,14 @@ impl DocumentDao {
         file_path: &str,
     ) -> Result<Document, duckdb::Error> {
         let id = nanoid::nanoid!();
-        let conn = pool.conn();
-
-        conn.execute(
-            "INSERT INTO documents (id, batch_id, filename, original_name, content_type, file_size, file_path)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-            params![id, batch_id, filename, original_name, content_type, file_size, file_path],
-        )?;
-
+        {
+            let conn = pool.conn();
+            conn.execute(
+                "INSERT INTO documents (id, batch_id, filename, original_name, content_type, file_size, file_path)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                params![id, batch_id, filename, original_name, content_type, file_size, file_path],
+            )?;
+        }
         Self::get_by_id(pool, &id)
     }
 
@@ -30,7 +30,7 @@ impl DocumentDao {
         let conn = pool.conn();
         conn.query_row(
             "SELECT id, batch_id, filename, original_name, content_type, file_size,
-                    file_path, status, error_message, created_at, updated_at
+                    file_path, status, error_message, CAST(created_at AS VARCHAR), CAST(updated_at AS VARCHAR)
              FROM documents WHERE id = ?",
             params![id],
             |row| {
@@ -55,7 +55,7 @@ impl DocumentDao {
         let conn = pool.conn();
         let mut stmt = conn.prepare(
             "SELECT id, batch_id, filename, original_name, content_type, file_size,
-                    file_path, status, error_message, created_at, updated_at
+                    file_path, status, error_message, CAST(created_at AS VARCHAR), CAST(updated_at AS VARCHAR)
              FROM documents WHERE batch_id = ? ORDER BY created_at ASC",
         )?;
 
