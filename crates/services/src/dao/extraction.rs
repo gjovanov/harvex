@@ -64,6 +64,41 @@ impl ExtractionDao {
         rows.collect()
     }
 
+    /// List extractions with optional filtering by document_type and min confidence.
+    pub fn list_by_batch_filtered(
+        pool: &DbPool,
+        batch_id: &str,
+        document_type: Option<&str>,
+        min_confidence: Option<f64>,
+    ) -> Result<Vec<Extraction>, duckdb::Error> {
+        let conn = pool.conn();
+
+        let mut sql = String::from(
+            "SELECT id, document_id, batch_id, document_type, raw_text,
+                    structured_data, confidence, model_used, processing_time_ms, created_at
+             FROM extractions WHERE batch_id = ?",
+        );
+
+        let mut param_values: Vec<Box<dyn duckdb::ToSql>> = vec![Box::new(batch_id.to_string())];
+
+        if let Some(dt) = document_type {
+            sql.push_str(" AND document_type = ?");
+            param_values.push(Box::new(dt.to_string()));
+        }
+
+        if let Some(mc) = min_confidence {
+            sql.push_str(" AND confidence >= ?");
+            param_values.push(Box::new(mc));
+        }
+
+        sql.push_str(" ORDER BY created_at ASC");
+
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn duckdb::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(params.as_slice(), Self::map_row)?;
+        rows.collect()
+    }
+
     pub fn update_structured(
         pool: &DbPool,
         id: &str,
@@ -82,6 +117,15 @@ impl ExtractionDao {
             params![document_type, structured_json, confidence, model_used, processing_time_ms, id],
         )?;
         Ok(())
+    }
+
+    /// Delete all extractions for a batch.
+    pub fn delete_by_batch(pool: &DbPool, batch_id: &str) -> Result<usize, duckdb::Error> {
+        let conn = pool.conn();
+        conn.execute(
+            "DELETE FROM extractions WHERE batch_id = ?",
+            params![batch_id],
+        )
     }
 
     fn map_row(row: &duckdb::Row<'_>) -> Result<Extraction, duckdb::Error> {

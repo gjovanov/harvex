@@ -84,6 +84,20 @@ impl DocumentDao {
         Ok(affected > 0)
     }
 
+    /// Delete all documents for a batch. Returns list of file_paths for cleanup.
+    pub fn delete_by_batch(pool: &DbPool, batch_id: &str) -> Result<Vec<String>, duckdb::Error> {
+        let docs = Self::list_by_batch(pool, batch_id)?;
+        let paths: Vec<String> = docs.iter().map(|d| d.file_path.clone()).collect();
+
+        let conn = pool.conn();
+        conn.execute(
+            "DELETE FROM documents WHERE batch_id = ?",
+            params![batch_id],
+        )?;
+
+        Ok(paths)
+    }
+
     pub fn update_status(
         pool: &DbPool,
         id: &str,

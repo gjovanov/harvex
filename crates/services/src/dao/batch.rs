@@ -90,6 +90,12 @@ impl BatchDao {
         Ok(())
     }
 
+    pub fn delete(pool: &DbPool, id: &str) -> Result<bool, duckdb::Error> {
+        let conn = pool.conn();
+        let affected = conn.execute("DELETE FROM batches WHERE id = ?", params![id])?;
+        Ok(affected > 0)
+    }
+
     pub fn set_total_files(pool: &DbPool, id: &str, total: i32) -> Result<(), duckdb::Error> {
         let conn = pool.conn();
         conn.execute(

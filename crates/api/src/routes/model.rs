@@ -12,7 +12,9 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/model", get(get_model_info))
         .route("/model/switch", post(switch_model))
+        .route("/model/settings", post(update_settings))
         .route("/model/health", get(check_llm_health))
+        .route("/model/list", get(list_models))
 }
 
 /// Get current LLM model info and settings.
@@ -47,6 +49,41 @@ async fn switch_model(
     })))
 }
 
+#[derive(Deserialize)]
+struct UpdateSettingsRequest {
+    api_url: Option<String>,
+    api_key: Option<String>,
+    temperature: Option<f32>,
+    max_tokens: Option<u32>,
+    context_size: Option<u32>,
+}
+
+/// Update LLM settings at runtime.
+async fn update_settings(
+    State(state): State<AppState>,
+    Json(body): Json<UpdateSettingsRequest>,
+) -> Result<Json<Value>, ApiError> {
+    state.llm.update_settings(
+        body.api_url.as_deref(),
+        body.api_key.as_deref(),
+        body.temperature,
+        body.max_tokens,
+        body.context_size,
+    );
+
+    let settings = state.llm.settings();
+    Ok(Json(json!({
+        "message": "Settings updated",
+        "current": {
+            "model_name": settings.model_name,
+            "api_url": settings.api_url,
+            "context_size": settings.context_size,
+            "temperature": settings.temperature,
+            "max_tokens": settings.max_tokens,
+        }
+    })))
+}
+
 /// Check if the LLM API is reachable.
 async fn check_llm_health(State(state): State<AppState>) -> Json<Value> {
     let reachable = state.llm.health_check().await.unwrap_or(false);
@@ -57,4 +94,20 @@ async fn check_llm_health(State(state): State<AppState>) -> Json<Value> {
         "api_url": settings.api_url,
         "reachable": reachable,
     }))
+}
+
+/// List available models from the LLM API (e.g., Ollama).
+async fn list_models(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let models = state
+        .llm
+        .list_models()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let current = state.llm.model_name();
+
+    Ok(Json(json!({
+        "current_model": current,
+        "available": models,
+    })))
 }

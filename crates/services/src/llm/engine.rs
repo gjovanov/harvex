@@ -94,6 +94,66 @@ impl LlmEngine {
         settings.model_name = model_name.to_string();
     }
 
+    /// Update LLM settings at runtime.
+    pub fn update_settings(
+        &self,
+        api_url: Option<&str>,
+        api_key: Option<&str>,
+        temperature: Option<f32>,
+        max_tokens: Option<u32>,
+        context_size: Option<u32>,
+    ) {
+        let mut settings = self.settings.write().unwrap();
+        if let Some(url) = api_url {
+            info!("Updating LLM api_url: {}", url);
+            settings.api_url = url.to_string();
+        }
+        if let Some(key) = api_key {
+            settings.api_key = key.to_string();
+        }
+        if let Some(temp) = temperature {
+            settings.temperature = temp;
+        }
+        if let Some(mt) = max_tokens {
+            settings.max_tokens = mt;
+        }
+        if let Some(cs) = context_size {
+            settings.context_size = cs;
+        }
+    }
+
+    /// List available models from the API (works with Ollama and OpenAI-compatible APIs).
+    pub async fn list_models(&self) -> Result<Vec<serde_json::Value>, anyhow::Error> {
+        let settings = self.settings.read().unwrap().clone();
+        let url = format!("{}/models", settings.api_url);
+
+        let mut req = self.client.get(&url);
+        if !settings.api_key.is_empty() {
+            req = req.bearer_auth(&settings.api_key);
+        }
+
+        let response = req.send().await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("Failed to list models: {status}: {body}"));
+        }
+
+        let body: serde_json::Value = response.json().await?;
+
+        // OpenAI format: { "data": [...] }
+        // Ollama format: { "models": [...] }
+        let models = body
+            .get("data")
+            .or_else(|| body.get("models"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        Ok(models)
+    }
+
     /// Check if the LLM API is reachable.
     pub async fn health_check(&self) -> Result<bool, anyhow::Error> {
         let settings = self.settings.read().unwrap().clone();

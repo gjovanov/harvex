@@ -11,12 +11,12 @@ use tokio_stream::StreamExt;
 
 use crate::error::ApiError;
 use crate::state::AppState;
-use harvex_services::BatchDao;
+use harvex_services::{BatchDao, DocumentDao, ExtractionDao};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/batch", get(list_batches).post(create_batch))
-        .route("/batch/{id}", get(get_batch))
+        .route("/batch/{id}", get(get_batch).delete(delete_batch))
         .route("/batch/{id}/process", post(process_batch))
         .route("/batch/{id}/progress", get(batch_progress))
 }
@@ -99,4 +99,46 @@ async fn batch_progress(
     });
 
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// Delete a batch and all its documents, extractions, and files.
+async fn delete_batch(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    // Verify batch exists
+    let batch = BatchDao::get_by_id(&state.db, &id)
+        .map_err(|_| ApiError::NotFound(format!("Batch {id} not found")))?;
+
+    if batch.status == "processing" {
+        return Err(ApiError::BadRequest(
+            "Cannot delete a batch that is currently processing".into(),
+        ));
+    }
+
+    // Cascade: delete extractions → delete documents (get file paths) → delete files → delete batch
+    ExtractionDao::delete_by_batch(&state.db, &id)
+        .map_err(|e| ApiError::Internal(format!("Failed to delete extractions: {e}")))?;
+
+    let file_paths = DocumentDao::delete_by_batch(&state.db, &id)
+        .map_err(|e| ApiError::Internal(format!("Failed to delete documents: {e}")))?;
+
+    // Clean up files from disk
+    for path in &file_paths {
+        let _ = std::fs::remove_file(path);
+    }
+
+    // Remove batch upload directory
+    let batch_dir = format!("{}/{}", state.config.storage.upload_dir, id);
+    let _ = std::fs::remove_dir_all(&batch_dir);
+
+    // Delete batch record
+    BatchDao::delete(&state.db, &id)
+        .map_err(|e| ApiError::Internal(format!("Failed to delete batch: {e}")))?;
+
+    Ok(Json(json!({
+        "message": "Batch deleted successfully",
+        "batch_id": id,
+        "files_removed": file_paths.len(),
+    })))
 }
