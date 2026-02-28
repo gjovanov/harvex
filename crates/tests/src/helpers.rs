@@ -39,6 +39,9 @@ impl TestApp {
                 context_size: 2048,
                 temperature: 0.1,
                 max_tokens: 1024,
+                vision_model_name: String::new(),
+                vision_dpi: 200,
+                vision_max_pages: 5,
             },
         };
 

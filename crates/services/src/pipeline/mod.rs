@@ -3,6 +3,7 @@ pub mod excel;
 pub mod ocr;
 pub mod orchestrator;
 pub mod pdf;
+pub mod pdf_render;
 pub mod word;
 
 pub use detector::FileType;

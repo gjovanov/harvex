@@ -1,6 +1,7 @@
 use std::sync::RwLock;
 use std::time::Instant;
 
+use base64::Engine as _;
 use harvex_config::LlmSettings;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -30,6 +31,7 @@ struct ChatRequest {
     messages: Vec<ChatMessage>,
     temperature: f32,
     max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<ResponseFormat>,
 }
 
@@ -41,7 +43,30 @@ struct ResponseFormat {
 #[derive(Serialize, Clone)]
 struct ChatMessage {
     role: String,
-    content: String,
+    content: MessageContent,
+}
+
+/// Message content — either plain text or multimodal parts (for vision).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(untagged)]
+enum MessageContent {
+    Text(String),
+    Parts(Vec<ContentPart>),
+}
+
+/// A single part of a multimodal message.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "type")]
+enum ContentPart {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrl },
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct ImageUrl {
+    url: String,
 }
 
 #[derive(Deserialize)]
@@ -67,8 +92,14 @@ impl LlmEngine {
             .expect("Failed to build HTTP client");
 
         info!(
-            "LLM engine initialized: model={}, api={}",
-            settings.model_name, settings.api_url
+            "LLM engine initialized: model={}, vision_model={}, api={}",
+            settings.model_name,
+            if settings.vision_model_name.is_empty() {
+                "(disabled)"
+            } else {
+                &settings.vision_model_name
+            },
+            settings.api_url
         );
 
         Self {
@@ -87,10 +118,19 @@ impl LlmEngine {
         self.settings.read().unwrap().clone()
     }
 
+    /// Check if vision model is configured.
+    pub fn has_vision(&self) -> bool {
+        let s = self.settings.read().unwrap();
+        !s.vision_model_name.is_empty()
+    }
+
     /// Switch to a different model.
     pub fn switch_model(&self, model_name: &str) {
         let mut settings = self.settings.write().unwrap();
-        info!("Switching LLM model: {} -> {}", settings.model_name, model_name);
+        info!(
+            "Switching LLM model: {} -> {}",
+            settings.model_name, model_name
+        );
         settings.model_name = model_name.to_string();
     }
 
@@ -102,6 +142,7 @@ impl LlmEngine {
         temperature: Option<f32>,
         max_tokens: Option<u32>,
         context_size: Option<u32>,
+        vision_model_name: Option<&str>,
     ) {
         let mut settings = self.settings.write().unwrap();
         if let Some(url) = api_url {
@@ -119,6 +160,10 @@ impl LlmEngine {
         }
         if let Some(cs) = context_size {
             settings.context_size = cs;
+        }
+        if let Some(vm) = vision_model_name {
+            info!("Updating vision model: {}", vm);
+            settings.vision_model_name = vm.to_string();
         }
     }
 
@@ -206,11 +251,11 @@ impl LlmEngine {
             messages: vec![
                 ChatMessage {
                     role: "system".into(),
-                    content: system_prompt,
+                    content: MessageContent::Text(system_prompt),
                 },
                 ChatMessage {
                     role: "user".into(),
-                    content: truncated_text,
+                    content: MessageContent::Text(truncated_text),
                 },
             ],
             temperature: settings.temperature,
@@ -232,9 +277,7 @@ impl LlmEngine {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!(
-                "LLM API returned {status}: {body}"
-            ));
+            return Err(anyhow::anyhow!("LLM API returned {status}: {body}"));
         }
 
         let chat_response: ChatResponse = response.json().await?;
@@ -269,6 +312,216 @@ impl LlmEngine {
             model_used: settings.model_name,
             processing_time_ms: elapsed_ms,
         })
+    }
+
+    /// Extract structured data from page images using the vision LLM.
+    ///
+    /// Processes each page individually, then merges multi-page results
+    /// using the text model.
+    pub async fn extract_structured_with_vision(
+        &self,
+        page_images: &[Vec<u8>],
+        document_type_hint: &str,
+    ) -> Result<LlmResponse, anyhow::Error> {
+        let settings = self.settings.read().unwrap().clone();
+
+        if settings.vision_model_name.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Vision model not configured (vision_model_name is empty)"
+            ));
+        }
+
+        let start = Instant::now();
+        let total_pages = page_images.len();
+        let system_prompt = prompts::system_prompt(document_type_hint);
+
+        info!(
+            "Vision inference: model={}, pages={}, doc_type={}",
+            settings.vision_model_name, total_pages, document_type_hint
+        );
+
+        let mut page_results: Vec<serde_json::Value> = Vec::new();
+
+        for (i, image_bytes) in page_images.iter().enumerate() {
+            let page_num = i + 1;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(image_bytes);
+            let data_url = format!("data:image/jpeg;base64,{b64}");
+
+            let user_prompt =
+                prompts::vision_user_prompt(document_type_hint, page_num, total_pages);
+
+            let request = ChatRequest {
+                model: settings.vision_model_name.clone(),
+                messages: vec![
+                    ChatMessage {
+                        role: "system".into(),
+                        content: MessageContent::Text(system_prompt.clone()),
+                    },
+                    ChatMessage {
+                        role: "user".into(),
+                        content: MessageContent::Parts(vec![
+                            ContentPart::Text { text: user_prompt },
+                            ContentPart::ImageUrl {
+                                image_url: ImageUrl { url: data_url },
+                            },
+                        ]),
+                    },
+                ],
+                temperature: settings.temperature,
+                max_tokens: settings.max_tokens,
+                response_format: Some(ResponseFormat {
+                    r#type: "json_object".into(),
+                }),
+            };
+
+            let url = format!("{}/chat/completions", settings.api_url);
+
+            let mut req = self.client.post(&url).json(&request);
+            if !settings.api_key.is_empty() {
+                req = req.bearer_auth(&settings.api_key);
+            }
+
+            debug!(
+                "Vision: sending page {}/{} ({} bytes)",
+                page_num,
+                total_pages,
+                image_bytes.len()
+            );
+
+            let response = req.send().await?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                warn!(
+                    "Vision LLM failed for page {}: {} {}",
+                    page_num, status, body
+                );
+                continue;
+            }
+
+            let chat_response: ChatResponse = response.json().await?;
+            let content = chat_response
+                .choices
+                .first()
+                .map(|c| c.message.content.clone())
+                .unwrap_or_default();
+
+            let (page_data, _) = parse_llm_response(&content);
+            debug!("Vision: page {}/{} extracted", page_num, total_pages);
+            page_results.push(page_data);
+        }
+
+        if page_results.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Vision LLM returned no results for any page"
+            ));
+        }
+
+        // Single page — use directly; multi-page — merge via text model
+        let (structured_data, confidence, model_used) = if page_results.len() == 1 {
+            let confidence = page_results[0]
+                .get("confidence")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.7);
+            (
+                page_results.into_iter().next().unwrap(),
+                confidence,
+                settings.vision_model_name.clone(),
+            )
+        } else {
+            self.merge_page_results(&page_results, document_type_hint, &settings)
+                .await?
+        };
+
+        let final_doc_type = structured_data
+            .get("document_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or(document_type_hint)
+            .to_string();
+
+        let elapsed_ms = start.elapsed().as_millis() as i64;
+
+        info!(
+            "Vision inference complete: model={}, doc_type={}, confidence={:.2}, pages={}, time={}ms",
+            model_used, final_doc_type, confidence, total_pages, elapsed_ms
+        );
+
+        Ok(LlmResponse {
+            structured_data,
+            document_type: final_doc_type,
+            confidence,
+            model_used,
+            processing_time_ms: elapsed_ms,
+        })
+    }
+
+    /// Merge per-page extraction results into a single JSON using the text model.
+    async fn merge_page_results(
+        &self,
+        page_results: &[serde_json::Value],
+        document_type_hint: &str,
+        settings: &LlmSettings,
+    ) -> Result<(serde_json::Value, f64, String), anyhow::Error> {
+        let system_prompt = prompts::system_prompt(document_type_hint);
+        let merge_prompt = prompts::merge_pages_prompt(document_type_hint, page_results);
+
+        info!(
+            "Merging {} page results via text model: {}",
+            page_results.len(),
+            settings.model_name
+        );
+
+        let request = ChatRequest {
+            model: settings.model_name.clone(),
+            messages: vec![
+                ChatMessage {
+                    role: "system".into(),
+                    content: MessageContent::Text(system_prompt),
+                },
+                ChatMessage {
+                    role: "user".into(),
+                    content: MessageContent::Text(merge_prompt),
+                },
+            ],
+            temperature: settings.temperature,
+            max_tokens: settings.max_tokens,
+            response_format: Some(ResponseFormat {
+                r#type: "json_object".into(),
+            }),
+        };
+
+        let url = format!("{}/chat/completions", settings.api_url);
+
+        let mut req = self.client.post(&url).json(&request);
+        if !settings.api_key.is_empty() {
+            req = req.bearer_auth(&settings.api_key);
+        }
+
+        let response = req.send().await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "LLM merge API returned {status}: {body}"
+            ));
+        }
+
+        let chat_response: ChatResponse = response.json().await?;
+        let content = chat_response
+            .choices
+            .first()
+            .map(|c| c.message.content.clone())
+            .unwrap_or_default();
+
+        let (data, confidence) = parse_llm_response(&content);
+        let model_used = format!(
+            "{}+{}",
+            settings.vision_model_name, settings.model_name
+        );
+
+        Ok((data, confidence, model_used))
     }
 }
 
@@ -369,5 +622,38 @@ mod tests {
         let (value, confidence) = parse_llm_response(input);
         assert!(value.get("raw_response").is_some());
         assert!((confidence - 0.3).abs() < 0.01);
+    }
+
+    #[test]
+    fn message_content_text_serializes_as_string() {
+        let msg = ChatMessage {
+            role: "user".into(),
+            content: MessageContent::Text("hello".into()),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["content"], "hello");
+    }
+
+    #[test]
+    fn message_content_parts_serializes_as_array() {
+        let msg = ChatMessage {
+            role: "user".into(),
+            content: MessageContent::Parts(vec![
+                ContentPart::Text {
+                    text: "describe this".into(),
+                },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "data:image/jpeg;base64,abc123".into(),
+                    },
+                },
+            ]),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        let parts = json["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/jpeg;base64,abc123");
     }
 }

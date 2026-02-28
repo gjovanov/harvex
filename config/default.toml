@@ -20,3 +20,7 @@ model_name = "qwen2.5:7b"
 context_size = 4096
 temperature = 0.1
 max_tokens = 2048
+# Vision model for scanned PDFs and images (empty = disabled)
+vision_model_name = ""
+vision_dpi = 200
+vision_max_pages = 5

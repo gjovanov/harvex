@@ -39,6 +39,20 @@ pub struct LlmSettings {
     pub context_size: u32,
     pub temperature: f32,
     pub max_tokens: u32,
+    #[serde(default)]
+    pub vision_model_name: String,
+    #[serde(default = "default_vision_dpi")]
+    pub vision_dpi: u32,
+    #[serde(default = "default_vision_max_pages")]
+    pub vision_max_pages: u32,
+}
+
+fn default_vision_dpi() -> u32 {
+    200
+}
+
+fn default_vision_max_pages() -> u32 {
+    5
 }
 
 impl Settings {

@@ -26,6 +26,9 @@ async fn get_model_info(State(state): State<AppState>) -> Json<Value> {
         "context_size": settings.context_size,
         "temperature": settings.temperature,
         "max_tokens": settings.max_tokens,
+        "vision_model_name": settings.vision_model_name,
+        "vision_dpi": settings.vision_dpi,
+        "vision_max_pages": settings.vision_max_pages,
     }))
 }
 
@@ -56,6 +59,7 @@ struct UpdateSettingsRequest {
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     context_size: Option<u32>,
+    vision_model_name: Option<String>,
 }
 
 /// Update LLM settings at runtime.
@@ -69,6 +73,7 @@ async fn update_settings(
         body.temperature,
         body.max_tokens,
         body.context_size,
+        body.vision_model_name.as_deref(),
     );
 
     let settings = state.llm.settings();
@@ -80,6 +85,9 @@ async fn update_settings(
             "context_size": settings.context_size,
             "temperature": settings.temperature,
             "max_tokens": settings.max_tokens,
+            "vision_model_name": settings.vision_model_name,
+            "vision_dpi": settings.vision_dpi,
+            "vision_max_pages": settings.vision_max_pages,
         }
     })))
 }

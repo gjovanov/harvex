@@ -9,6 +9,63 @@ pub fn system_prompt(document_type: &str) -> String {
     }
 }
 
+/// Build the user prompt for a vision model processing a document page image.
+pub fn vision_user_prompt(document_type: &str, page_num: usize, total_pages: usize) -> String {
+    let doc_instruction = match document_type {
+        "invoice" => "Extract the invoice data from this document image.",
+        "bank_statement" => "Extract the bank statement data from this document image.",
+        "payment" => "Extract the payment data from this document image.",
+        "receipt" => "Extract the receipt data from this document image.",
+        _ => "Extract all key information from this document image.",
+    };
+
+    if total_pages > 1 {
+        format!(
+            "{doc_instruction}\n\nThis is page {page_num} of {total_pages}. \
+             Extract all visible data from this page. \
+             Respond with a single JSON object only. No explanations."
+        )
+    } else {
+        format!(
+            "{doc_instruction}\n\nRespond with a single JSON object only. No explanations."
+        )
+    }
+}
+
+/// Build the merge prompt for combining per-page extraction results.
+pub fn merge_pages_prompt(
+    document_type: &str,
+    page_results: &[serde_json::Value],
+) -> String {
+    let pages_json: Vec<String> = page_results
+        .iter()
+        .enumerate()
+        .map(|(i, v)| format!("Page {}:\n{}", i + 1, serde_json::to_string_pretty(v).unwrap_or_default()))
+        .collect();
+
+    let doc_label = match document_type {
+        "invoice" => "invoice",
+        "bank_statement" => "bank statement",
+        "payment" => "payment document",
+        "receipt" => "receipt",
+        _ => "document",
+    };
+
+    format!(
+        "The following JSON objects were extracted from individual pages of a {doc_label}. \
+         Merge them into a single coherent JSON object.\n\n\
+         Rules:\n\
+         - Combine line_items/transactions/items from all pages into one array\n\
+         - Use header fields (vendor, dates, totals) from whichever page has them\n\
+         - If totals appear on multiple pages, prefer the final page's values\n\
+         - Remove duplicates\n\
+         - Keep the same JSON schema as the individual pages\n\n\
+         {}\n\n\
+         Respond with a single merged JSON object only. No explanations.",
+        pages_json.join("\n\n")
+    )
+}
+
 /// Build the user prompt with the document text.
 pub fn user_prompt(raw_text: &str, document_type: &str) -> String {
     let instruction = match document_type {

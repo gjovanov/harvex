@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -14,7 +14,7 @@ use crate::dao::{BatchDao, DocumentDao, ExtractionDao};
 use crate::llm::LlmEngine;
 
 use super::detector::FileType;
-use super::{excel, ocr, pdf, word};
+use super::{excel, ocr, pdf, pdf_render, word};
 
 /// Progress event sent via SSE to clients.
 #[derive(Debug, Clone, Serialize)]
@@ -27,6 +27,16 @@ pub struct ProgressEvent {
     pub processed: i32,
     pub failed: i32,
     pub total: i32,
+}
+
+/// Result of text extraction — either usable text or a path needing vision processing.
+enum ExtractedContent {
+    /// Text was extracted successfully; proceed with text LLM.
+    Text(String),
+    /// Scanned PDF — needs vision LLM. Contains the file path.
+    NeedsVisionPdf(PathBuf),
+    /// Image file — needs vision LLM. Contains the raw image bytes.
+    NeedsVisionImage(Vec<u8>),
 }
 
 /// The processing pipeline. Holds a broadcast sender for progress events
@@ -204,38 +214,33 @@ async fn process_document(
     let path = file_path.to_path_buf();
     let ft = file_type.clone();
 
-    let raw_text =
-        tokio::task::spawn_blocking(move || -> Result<String, anyhow::Error> {
+    let extracted =
+        tokio::task::spawn_blocking(move || -> Result<ExtractedContent, anyhow::Error> {
             match ft {
                 FileType::Pdf => {
                     let result = pdf::extract_text(&path)?;
                     if result.is_scanned && result.text.is_empty() {
                         warn!("Scanned PDF detected, no text extracted. Needs LLM vision.");
-                        Ok(
-                            "[Scanned PDF — no text extracted. Requires vision LLM processing.]"
-                                .to_string(),
-                        )
+                        Ok(ExtractedContent::NeedsVisionPdf(path))
                     } else {
-                        Ok(result.text)
+                        Ok(ExtractedContent::Text(result.text))
                     }
                 }
                 FileType::Excel => {
                     let result = excel::extract_text(&path)?;
-                    Ok(result.text)
+                    Ok(ExtractedContent::Text(result.text))
                 }
                 FileType::Word => {
                     let result = word::extract_text(&path)?;
-                    Ok(result.text)
+                    Ok(ExtractedContent::Text(result.text))
                 }
                 FileType::Image => {
                     let result = ocr::extract_text(&path)?;
                     if result.needs_llm_vision {
-                        Ok(format!(
-                            "[Image {}x{} — requires vision LLM processing.]",
-                            result.width, result.height
-                        ))
+                        let bytes = std::fs::read(&path)?;
+                        Ok(ExtractedContent::NeedsVisionImage(bytes))
                     } else {
-                        Ok(result.text)
+                        Ok(ExtractedContent::Text(result.text))
                     }
                 }
                 FileType::Unknown(ext) => {
@@ -247,28 +252,45 @@ async fn process_document(
 
     let extract_elapsed_ms = start.elapsed().as_millis() as i64;
 
-    // Step 2: Classify document type from extracted text
-    let doc_type = classify_document_type(&raw_text);
+    match extracted {
+        ExtractedContent::Text(raw_text) => {
+            process_text_path(db, doc, llm, &raw_text, extract_elapsed_ms).await
+        }
+        ExtractedContent::NeedsVisionPdf(pdf_path) => {
+            process_vision_pdf_path(db, doc, llm, &pdf_path, extract_elapsed_ms).await
+        }
+        ExtractedContent::NeedsVisionImage(image_bytes) => {
+            process_vision_image_path(db, doc, llm, &image_bytes, extract_elapsed_ms).await
+        }
+    }
+}
 
-    // Step 3: Create initial extraction record with raw text
+/// Text path: classify → text LLM → store (existing behavior).
+async fn process_text_path(
+    db: &DbPool,
+    doc: &Document,
+    llm: &LlmEngine,
+    raw_text: &str,
+    extract_elapsed_ms: i64,
+) -> Result<String, anyhow::Error> {
+    let doc_type = classify_document_type(raw_text);
+
     let extraction = ExtractionDao::create(
         db,
         &doc.id,
         &doc.batch_id,
         doc_type,
-        Some(&raw_text),
+        Some(raw_text),
         None,
         0.0,
         None,
         extract_elapsed_ms,
     )?;
 
-    // Step 4: LLM inference for structured data extraction
-    let llm_result = llm.extract_structured(&raw_text, doc_type).await;
+    let llm_result = llm.extract_structured(raw_text, doc_type).await;
 
     match llm_result {
         Ok(response) => {
-            // Update extraction with structured data from LLM
             ExtractionDao::update_structured(
                 db,
                 &extraction.id,
@@ -289,8 +311,6 @@ async fn process_document(
             ))
         }
         Err(e) => {
-            // Text extraction succeeded but LLM failed — still mark as completed
-            // with the raw text, but log the LLM error
             warn!(
                 "LLM inference failed for {}: {e}. Keeping raw text extraction.",
                 doc.original_name
@@ -301,6 +321,192 @@ async fn process_document(
                 "Extracted {} chars (LLM unavailable: {e})",
                 raw_text.len()
             ))
+        }
+    }
+}
+
+/// Vision PDF path: render pages → vision LLM → store.
+async fn process_vision_pdf_path(
+    db: &DbPool,
+    doc: &Document,
+    llm: &LlmEngine,
+    pdf_path: &Path,
+    extract_elapsed_ms: i64,
+) -> Result<String, anyhow::Error> {
+    if !llm.has_vision() {
+        warn!(
+            "Scanned PDF {} needs vision LLM but no vision model configured. Skipping.",
+            doc.original_name
+        );
+        let raw_text = "[Scanned PDF — no text extracted. Vision model not configured.]";
+
+        let extraction = ExtractionDao::create(
+            db,
+            &doc.id,
+            &doc.batch_id,
+            "other",
+            Some(raw_text),
+            None,
+            0.0,
+            None,
+            extract_elapsed_ms,
+        )?;
+
+        DocumentDao::update_status(db, &doc.id, "completed", None)?;
+
+        return Ok(format!(
+            "Scanned PDF — vision model not configured (extraction {})",
+            extraction.id
+        ));
+    }
+
+    let settings = llm.settings();
+    let dpi = settings.vision_dpi;
+    let max_pages = settings.vision_max_pages;
+
+    // Render PDF pages to JPEG (blocking I/O)
+    let path = pdf_path.to_path_buf();
+    let rendered = tokio::task::spawn_blocking(move || {
+        pdf_render::render_pdf_pages(&path, dpi, max_pages)
+    })
+    .await??;
+
+    let page_count = rendered.pages.len();
+    let raw_text = format!("[Vision: {} pages processed]", page_count);
+
+    let extraction = ExtractionDao::create(
+        db,
+        &doc.id,
+        &doc.batch_id,
+        "other",
+        Some(&raw_text),
+        None,
+        0.0,
+        None,
+        extract_elapsed_ms,
+    )?;
+
+    // Vision LLM extraction
+    let llm_result = llm
+        .extract_structured_with_vision(&rendered.pages, "other")
+        .await;
+
+    match llm_result {
+        Ok(response) => {
+            ExtractionDao::update_structured(
+                db,
+                &extraction.id,
+                &response.document_type,
+                Some(&response.structured_data),
+                response.confidence,
+                Some(&response.model_used),
+                extract_elapsed_ms + response.processing_time_ms,
+            )?;
+
+            DocumentDao::update_status(db, &doc.id, "completed", None)?;
+
+            Ok(format!(
+                "Vision: {} pages, structured as {} (confidence: {:.0}%, model: {})",
+                page_count,
+                response.document_type,
+                response.confidence * 100.0,
+                response.model_used
+            ))
+        }
+        Err(e) => {
+            warn!(
+                "Vision LLM failed for {}: {e}",
+                doc.original_name
+            );
+            DocumentDao::update_status(db, &doc.id, "completed", None)?;
+
+            Ok(format!(
+                "Vision: {} pages rendered (LLM failed: {e})",
+                page_count
+            ))
+        }
+    }
+}
+
+/// Vision image path: send image bytes → vision LLM → store.
+async fn process_vision_image_path(
+    db: &DbPool,
+    doc: &Document,
+    llm: &LlmEngine,
+    image_bytes: &[u8],
+    extract_elapsed_ms: i64,
+) -> Result<String, anyhow::Error> {
+    if !llm.has_vision() {
+        warn!(
+            "Image {} needs vision LLM but no vision model configured. Skipping.",
+            doc.original_name
+        );
+        let raw_text = "[Image — requires vision LLM. Vision model not configured.]";
+
+        ExtractionDao::create(
+            db,
+            &doc.id,
+            &doc.batch_id,
+            "other",
+            Some(raw_text),
+            None,
+            0.0,
+            None,
+            extract_elapsed_ms,
+        )?;
+
+        DocumentDao::update_status(db, &doc.id, "completed", None)?;
+
+        return Ok("Image — vision model not configured".to_string());
+    }
+
+    let raw_text = format!("[Vision: 1 image processed ({} bytes)]", image_bytes.len());
+
+    let extraction = ExtractionDao::create(
+        db,
+        &doc.id,
+        &doc.batch_id,
+        "other",
+        Some(&raw_text),
+        None,
+        0.0,
+        None,
+        extract_elapsed_ms,
+    )?;
+
+    let llm_result = llm
+        .extract_structured_with_vision(&[image_bytes.to_vec()], "other")
+        .await;
+
+    match llm_result {
+        Ok(response) => {
+            ExtractionDao::update_structured(
+                db,
+                &extraction.id,
+                &response.document_type,
+                Some(&response.structured_data),
+                response.confidence,
+                Some(&response.model_used),
+                extract_elapsed_ms + response.processing_time_ms,
+            )?;
+
+            DocumentDao::update_status(db, &doc.id, "completed", None)?;
+
+            Ok(format!(
+                "Vision image: structured as {} (confidence: {:.0}%, model: {})",
+                response.document_type,
+                response.confidence * 100.0,
+                response.model_used
+            ))
+        }
+        Err(e) => {
+            warn!(
+                "Vision LLM failed for image {}: {e}",
+                doc.original_name
+            );
+            DocumentDao::update_status(db, &doc.id, "completed", None)?;
+
+            Ok(format!("Image processed (LLM failed: {e})"))
         }
     }
 }

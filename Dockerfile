@@ -14,7 +14,7 @@ RUN bun run build
 
 # --- Stage 3: Runtime (nginx + Rust binary) ---
 FROM debian:bookworm-slim AS runtime
-RUN apt-get update && apt-get install -y ca-certificates nginx && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates nginx poppler-utils && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/harvex /usr/local/bin/
 COPY --from=ui-builder /app/ui/dist /var/www/harvex
