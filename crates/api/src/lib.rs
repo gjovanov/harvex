@@ -11,7 +11,7 @@ use crate::state::AppState;
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .merge(routes::health::routes())
-        .nest("/api", routes::api_routes(state.clone()))
+        .nest("/api", routes::api_routes())
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state)

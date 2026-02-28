@@ -1,14 +1,17 @@
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
 use serde::Serialize;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 
+use harvex_config::LlmSettings;
 use harvex_db::models::Document;
 use harvex_db::DbPool;
 
 use crate::dao::{BatchDao, DocumentDao, ExtractionDao};
+use crate::llm::LlmEngine;
 
 use super::detector::FileType;
 use super::{excel, ocr, pdf, word};
@@ -26,26 +29,30 @@ pub struct ProgressEvent {
     pub total: i32,
 }
 
-/// The processing pipeline. Holds a broadcast sender for progress events.
+/// The processing pipeline. Holds a broadcast sender for progress events
+/// and an LLM engine for structured data extraction.
 pub struct Pipeline {
     db: DbPool,
     max_concurrent: usize,
+    llm: Arc<LlmEngine>,
     progress_tx: broadcast::Sender<ProgressEvent>,
 }
 
 impl Pipeline {
-    pub fn new(db: DbPool, max_concurrent: usize) -> Self {
+    pub fn new(db: DbPool, max_concurrent: usize, llm_settings: LlmSettings) -> Self {
         let (progress_tx, _) = broadcast::channel(256);
+        let llm = Arc::new(LlmEngine::new(llm_settings));
         Self {
             db,
             max_concurrent,
+            llm,
             progress_tx,
         }
     }
 
-    /// Get a receiver for progress events.
-    pub fn subscribe(&self) -> broadcast::Receiver<ProgressEvent> {
-        self.progress_tx.subscribe()
+    /// Get a clone of the LLM engine (for sharing with API routes).
+    pub fn llm_engine(&self) -> Arc<LlmEngine> {
+        self.llm.clone()
     }
 
     /// Get a clone of the sender (for sharing with AppState).
@@ -55,8 +62,8 @@ impl Pipeline {
 
     /// Process all documents in a batch.
     ///
+    /// For each document: extract text, call LLM for structured data, store results.
     /// Documents are processed with limited concurrency using a semaphore.
-    /// Progress events are sent for each document as it completes.
     pub async fn process_batch(&self, batch_id: &str) -> Result<(), anyhow::Error> {
         let batch = BatchDao::get_by_id(&self.db, batch_id)
             .map_err(|_| anyhow::anyhow!("Batch {batch_id} not found"))?;
@@ -66,14 +73,17 @@ impl Pipeline {
         }
 
         BatchDao::update_status(&self.db, batch_id, "processing")?;
-        info!("Starting batch processing: {} ({} files)", batch.name, batch.total_files);
+        info!(
+            "Starting batch processing: {} ({} files)",
+            batch.name, batch.total_files
+        );
 
         let documents = DocumentDao::list_by_batch(&self.db, batch_id)?;
         let total = documents.len() as i32;
 
-        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(self.max_concurrent));
-        let processed = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0));
-        let failed = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(self.max_concurrent));
+        let processed = Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let failed = Arc::new(std::sync::atomic::AtomicI32::new(0));
 
         let mut handles = Vec::new();
 
@@ -84,14 +94,16 @@ impl Pipeline {
             let proc_count = processed.clone();
             let fail_count = failed.clone();
             let batch_id = batch_id.to_string();
+            let llm = self.llm.clone();
 
             let handle = tokio::spawn(async move {
                 let _permit = sem.acquire().await.expect("semaphore closed");
-                let result = process_document(&db, &doc).await;
+                let result = process_document(&db, &doc, &llm).await;
 
                 match result {
-                    Ok(text) => {
-                        let p = proc_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    Ok(msg) => {
+                        let p =
+                            proc_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                         let f = fail_count.load(std::sync::atomic::Ordering::Relaxed);
                         let _ = BatchDao::update_progress(&db, &batch_id, p, f);
 
@@ -100,18 +112,15 @@ impl Pipeline {
                             document_id: doc.id.clone(),
                             document_name: doc.original_name.clone(),
                             status: "completed".into(),
-                            message: format!(
-                                "Extracted {} chars from {}",
-                                text.len(),
-                                doc.original_name
-                            ),
+                            message: msg,
                             processed: p,
                             failed: f,
                             total,
                         });
                     }
                     Err(e) => {
-                        let f = fail_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        let f =
+                            fail_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                         let p = proc_count.load(std::sync::atomic::Ordering::Relaxed);
                         let _ = BatchDao::update_progress(&db, &batch_id, p, f);
 
@@ -150,7 +159,10 @@ impl Pipeline {
         };
 
         BatchDao::update_status(&self.db, batch_id, final_status)?;
-        info!("Batch {} finished: {} processed, {} failed", batch_id, p, f);
+        info!(
+            "Batch {} finished: {} processed, {} failed",
+            batch_id, p, f
+        );
 
         // Send final event
         let _ = self.progress_tx.send(ProgressEvent {
@@ -168,8 +180,12 @@ impl Pipeline {
     }
 }
 
-/// Process a single document: detect type, extract text, create extraction record.
-async fn process_document(db: &DbPool, doc: &Document) -> Result<String, anyhow::Error> {
+/// Process a single document: detect type → extract text → LLM inference → store.
+async fn process_document(
+    db: &DbPool,
+    doc: &Document,
+    llm: &LlmEngine,
+) -> Result<String, anyhow::Error> {
     let file_path = Path::new(&doc.file_path);
 
     if !file_path.exists() {
@@ -184,71 +200,109 @@ async fn process_document(db: &DbPool, doc: &Document) -> Result<String, anyhow:
 
     let start = Instant::now();
 
-    // Extract text based on file type (blocking I/O in spawn_blocking)
+    // Step 1: Extract text based on file type (blocking I/O)
     let path = file_path.to_path_buf();
     let ft = file_type.clone();
 
-    let extraction_result = tokio::task::spawn_blocking(move || -> Result<String, anyhow::Error> {
-        match ft {
-            FileType::Pdf => {
-                let result = pdf::extract_text(&path)?;
-                if result.is_scanned && result.text.is_empty() {
-                    // Scanned PDF with no text — try OCR on rendered pages
-                    // For now, note it needs LLM vision processing
-                    warn!("Scanned PDF detected, no text extracted. Needs LLM vision.");
-                    Ok("[Scanned PDF — no text extracted. Requires vision LLM processing.]"
-                        .to_string())
-                } else {
+    let raw_text =
+        tokio::task::spawn_blocking(move || -> Result<String, anyhow::Error> {
+            match ft {
+                FileType::Pdf => {
+                    let result = pdf::extract_text(&path)?;
+                    if result.is_scanned && result.text.is_empty() {
+                        warn!("Scanned PDF detected, no text extracted. Needs LLM vision.");
+                        Ok(
+                            "[Scanned PDF — no text extracted. Requires vision LLM processing.]"
+                                .to_string(),
+                        )
+                    } else {
+                        Ok(result.text)
+                    }
+                }
+                FileType::Excel => {
+                    let result = excel::extract_text(&path)?;
                     Ok(result.text)
                 }
-            }
-            FileType::Excel => {
-                let result = excel::extract_text(&path)?;
-                Ok(result.text)
-            }
-            FileType::Word => {
-                let result = word::extract_text(&path)?;
-                Ok(result.text)
-            }
-            FileType::Image => {
-                let result = ocr::extract_text(&path)?;
-                if result.needs_llm_vision {
-                    Ok(format!(
-                        "[Image {}x{} — requires vision LLM processing.]",
-                        result.width, result.height
-                    ))
-                } else {
+                FileType::Word => {
+                    let result = word::extract_text(&path)?;
                     Ok(result.text)
                 }
+                FileType::Image => {
+                    let result = ocr::extract_text(&path)?;
+                    if result.needs_llm_vision {
+                        Ok(format!(
+                            "[Image {}x{} — requires vision LLM processing.]",
+                            result.width, result.height
+                        ))
+                    } else {
+                        Ok(result.text)
+                    }
+                }
+                FileType::Unknown(ext) => {
+                    Err(anyhow::anyhow!("Unsupported file type: .{ext}"))
+                }
             }
-            FileType::Unknown(ext) => {
-                Err(anyhow::anyhow!("Unsupported file type: .{ext}"))
-            }
-        }
-    })
-    .await??;
+        })
+        .await??;
 
-    let elapsed_ms = start.elapsed().as_millis() as i64;
+    let extract_elapsed_ms = start.elapsed().as_millis() as i64;
 
-    // Determine document type hint from extracted text (simple heuristics)
-    let doc_type = classify_document_type(&extraction_result);
+    // Step 2: Classify document type from extracted text
+    let doc_type = classify_document_type(&raw_text);
 
-    // Store extraction result
-    ExtractionDao::create(
+    // Step 3: Create initial extraction record with raw text
+    let extraction = ExtractionDao::create(
         db,
         &doc.id,
         &doc.batch_id,
         doc_type,
-        Some(&extraction_result),
-        None, // structured_data populated by LLM in Phase 6
-        0.0,  // confidence set by LLM in Phase 6
-        None, // model_used set by LLM in Phase 6
-        elapsed_ms,
+        Some(&raw_text),
+        None,
+        0.0,
+        None,
+        extract_elapsed_ms,
     )?;
 
-    DocumentDao::update_status(db, &doc.id, "completed", None)?;
+    // Step 4: LLM inference for structured data extraction
+    let llm_result = llm.extract_structured(&raw_text, doc_type).await;
 
-    Ok(extraction_result)
+    match llm_result {
+        Ok(response) => {
+            // Update extraction with structured data from LLM
+            ExtractionDao::update_structured(
+                db,
+                &extraction.id,
+                &response.document_type,
+                Some(&response.structured_data),
+                response.confidence,
+                Some(&response.model_used),
+                extract_elapsed_ms + response.processing_time_ms,
+            )?;
+
+            DocumentDao::update_status(db, &doc.id, "completed", None)?;
+
+            Ok(format!(
+                "Extracted {} chars, LLM structured as {} (confidence: {:.0}%)",
+                raw_text.len(),
+                response.document_type,
+                response.confidence * 100.0
+            ))
+        }
+        Err(e) => {
+            // Text extraction succeeded but LLM failed — still mark as completed
+            // with the raw text, but log the LLM error
+            warn!(
+                "LLM inference failed for {}: {e}. Keeping raw text extraction.",
+                doc.original_name
+            );
+            DocumentDao::update_status(db, &doc.id, "completed", None)?;
+
+            Ok(format!(
+                "Extracted {} chars (LLM unavailable: {e})",
+                raw_text.len()
+            ))
+        }
+    }
 }
 
 /// Simple heuristic to classify document type based on extracted text.
@@ -265,20 +319,17 @@ fn classify_document_type(text: &str) -> &'static str {
     } else if lower.contains("bank statement")
         || lower.contains("account statement")
         || lower.contains("transaction history")
-        || lower.contains("balance")
-            && (lower.contains("debit") || lower.contains("credit"))
+        || (lower.contains("balance") && (lower.contains("debit") || lower.contains("credit")))
     {
         "bank_statement"
     } else if lower.contains("payment")
-        || lower.contains("receipt")
         || lower.contains("paid")
         || lower.contains("amount due")
     {
         "payment"
     } else if lower.contains("receipt")
         || lower.contains("cash register")
-        || lower.contains("total")
-            && lower.contains("tax")
+        || (lower.contains("total") && lower.contains("tax"))
     {
         "receipt"
     } else {

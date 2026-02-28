@@ -64,6 +64,26 @@ impl ExtractionDao {
         rows.collect()
     }
 
+    pub fn update_structured(
+        pool: &DbPool,
+        id: &str,
+        document_type: &str,
+        structured_data: Option<&serde_json::Value>,
+        confidence: f64,
+        model_used: Option<&str>,
+        processing_time_ms: i64,
+    ) -> Result<(), duckdb::Error> {
+        let conn = pool.conn();
+        let structured_json = structured_data.map(|v| v.to_string());
+
+        conn.execute(
+            "UPDATE extractions SET document_type = ?, structured_data = ?, confidence = ?,
+             model_used = ?, processing_time_ms = ? WHERE id = ?",
+            params![document_type, structured_json, confidence, model_used, processing_time_ms, id],
+        )?;
+        Ok(())
+    }
+
     fn map_row(row: &duckdb::Row<'_>) -> Result<Extraction, duckdb::Error> {
         let structured_str: Option<String> = row.get(5)?;
         let structured_data = structured_str

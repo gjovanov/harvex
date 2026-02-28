@@ -33,11 +33,12 @@ pub struct ProcessingSettings {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LlmSettings {
-    pub model_path: String,
+    pub api_url: String,
+    pub api_key: String,
     pub model_name: String,
     pub context_size: u32,
-    pub threads: u32,
-    pub gpu_layers: u32,
+    pub temperature: f32,
+    pub max_tokens: u32,
 }
 
 impl Settings {
