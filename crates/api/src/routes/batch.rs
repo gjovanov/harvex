@@ -59,9 +59,18 @@ async fn process_batch(
         .map_err(|_| ApiError::NotFound(format!("Batch {id} not found")))?;
 
     if batch.status == "processing" {
-        return Err(ApiError::BadRequest(
-            "Batch is already being processed".into(),
-        ));
+        // Reset stuck batch (e.g. pod restarted mid-processing)
+        tracing::warn!("Resetting stuck batch {} from 'processing' to 'pending'", id);
+        BatchDao::update_status(&state.db, &id, "pending")
+            .map_err(|e| ApiError::Internal(format!("Failed to reset batch: {e}")))?;
+        // Also reset any stuck documents
+        let docs = DocumentDao::list_by_batch(&state.db, &id)
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        for doc in &docs {
+            if doc.status == "processing" {
+                let _ = DocumentDao::update_status(&state.db, &doc.id, "pending", None);
+            }
+        }
     }
 
     // Spawn processing in background
@@ -110,11 +119,7 @@ async fn delete_batch(
     let batch = BatchDao::get_by_id(&state.db, &id)
         .map_err(|_| ApiError::NotFound(format!("Batch {id} not found")))?;
 
-    if batch.status == "processing" {
-        return Err(ApiError::BadRequest(
-            "Cannot delete a batch that is currently processing".into(),
-        ));
-    }
+    // Allow deleting stuck "processing" batches (e.g. orphaned after pod restart)
 
     // Cascade: delete extractions → delete documents (get file paths) → delete files → delete batch
     ExtractionDao::delete_by_batch(&state.db, &id)
