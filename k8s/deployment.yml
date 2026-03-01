@@ -17,7 +17,7 @@ data:
   HARVEX__LLM__CONTEXT_SIZE: "4096"
   HARVEX__LLM__TEMPERATURE: "0.1"
   HARVEX__LLM__MAX_TOKENS: "2048"
-  HARVEX__LLM__VISION_MODEL_NAME: "qwen2.5vl:32b"
+  HARVEX__LLM__VISION_MODEL_NAME: "qwen2.5vl:7b"
   HARVEX__LLM__VISION_DPI: "200"
   HARVEX__LLM__VISION_MAX_PAGES: "5"
   RUST_LOG: "info,harvex_api=debug,harvex_services=debug"

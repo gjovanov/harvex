@@ -87,7 +87,7 @@ struct ChatResponseMessage {
 impl LlmEngine {
     pub fn new(settings: LlmSettings) -> Self {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
+            .timeout(std::time::Duration::from_secs(1800))
             .build()
             .expect("Failed to build HTTP client");
 
